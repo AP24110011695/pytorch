@@ -17,7 +17,7 @@ from torch.testing._internal.common_device_type import (
     skipPRIVATEUSE1,
 )
 from torch.testing._internal.common_utils import HardwareClassification, requires_cuda
-from torch.testing._internal.inductor_utils import GPU_TYPE, HAS_GPU
+from torch.testing._internal.inductor_utils import HAS_GPU
 from torch.utils._triton import has_triton, has_triton_for_device
 
 
@@ -31,6 +31,9 @@ i32 = torch.int32
 
 @unittest.skipIf(not HAS_GPU, "requires GPU and Triton")
 class TestCompilerBisector(TestCase):
+    # This class remains gated at import time by the HAS_GPU skipIf decorator above.
+    hw_classification = HardwareClassification.ACCELERATOR
+
     test_ns = "_test_bisector"
 
     def tearDown(self):
@@ -46,62 +49,6 @@ class TestCompilerBisector(TestCase):
         lib = Library(self.test_ns, "FRAGMENT")  # noqa: SCOPED_LIBRARY
         self.lib = lib
         return lib
-
-    def test_bad_decomp(self):
-        import_module("torch._inductor.compile_fx")
-
-        def bad_exp_decomp(self, rate=1, generator=None):
-            if generator is not None:
-                raise AssertionError("Expected generator to be None")
-            torch._check(
-                not utils.is_complex_dtype(self.dtype)
-                and not utils.is_integer_dtype(self.dtype)
-                and not utils.is_boolean_dtype(self.dtype),
-                lambda: f"Exponential distribution is a continuous probability distribution. \
-                dtype must be a floating point but you specified {self.dtype}",
-            )
-            torch._check(
-                rate > 0.0,
-                lambda: f"exponential_ expects lambda > 0.0, but found lambda={rate}",
-            )
-            return torch.rand_like(self) * float("nan")
-
-        @contextmanager
-        def patch_exp_decomp():
-            from torch._inductor.compile_fx import select_decomp_table as old_decomp
-
-            def get_decomp():
-                out = old_decomp()
-                out = out.copy()
-                out[aten.exponential.default] = bad_exp_decomp
-                return out
-
-            torch._inductor.compile_fx.select_decomp_table = get_decomp
-            try:
-                yield
-
-            finally:
-                torch._inductor.compile_fx.select_decomp_table = old_decomp
-
-        def vq(x):
-            return (x + 3).exponential_() * 10.5
-
-        def test_fn():
-            torch._dynamo.reset()
-            with patch_exp_decomp():
-                vq_compiled = torch.compile(vq)  # noqa: UNSPECIFIED_BACKEND
-                x = torch.randn(4, 400, 256, device=GPU_TYPE)
-                with torch._dynamo.utils.preserve_rng_state():
-                    vq(x)
-                out_compiled = vq_compiled(x)
-
-            return not out_compiled.isnan().any()
-
-        out = CompilerBisector.do_bisect(test_fn)
-        self.assertEqual(out.backend, "aot_eager_decomp_partition")
-        self.assertEqual(out.subsystem, "decomposition")
-        self.assertEqual(out.bisect_number, 1)
-        self.assertTrue("aten.exponential" in out.debug_info)
 
     def test_pre_grad(self):
         import operator
@@ -164,7 +111,8 @@ class TestCompilerBisector(TestCase):
         def test_fn():
             torch._dynamo.reset()
 
-            inp = torch.rand([10], device=GPU_TYPE)
+            device_type = torch.accelerator.current_accelerator().type
+            inp = torch.rand([10], device=device_type)
 
             out = foo(inp)
             out_c = torch.compile(foo)(inp)  # noqa: UNSPECIFIED_BACKEND
@@ -263,7 +211,8 @@ class TestCompilerBisector(TestCase):
             try:
                 foo_c = torch.compile(foo, mode="reduce-overhead")  # noqa: UNSPECIFIED_BACKEND
                 bar_c = torch.compile(bar, mode="reduce-overhead")  # noqa: UNSPECIFIED_BACKEND
-                x = torch.randn(10, device=GPU_TYPE)
+                device_type = torch.accelerator.current_accelerator().type
+                x = torch.randn(10, device=device_type)
                 foo_c(x)
                 bar_c(x)
 
@@ -388,6 +337,64 @@ class TestCompilerBisectorDevice(TestCase):
         self.assertEqual(out.backend, "inductor")
         self.assertEqual(out.subsystem, "pre_grad_graph")
         self.assertEqual(out.bisect_number, 1)
+
+    def test_bad_decomp(self, device):
+        import_module("torch._inductor.compile_fx")
+
+        def bad_exp_decomp(self, rate=1, generator=None):
+            if generator is not None:
+                raise AssertionError("Expected generator to be None")
+            torch._check(
+                not utils.is_complex_dtype(self.dtype)
+                and not utils.is_integer_dtype(self.dtype)
+                and not utils.is_boolean_dtype(self.dtype),
+                lambda: (
+                    f"Exponential distribution is a continuous probability distribution. \
+                dtype must be a floating point but you specified {self.dtype}"
+                ),
+            )
+            torch._check(
+                rate > 0.0,
+                lambda: f"exponential_ expects lambda > 0.0, but found lambda={rate}",
+            )
+            return torch.rand_like(self) * float("nan")
+
+        @contextmanager
+        def patch_exp_decomp():
+            from torch._inductor.compile_fx import select_decomp_table as old_decomp
+
+            def get_decomp():
+                out = old_decomp()
+                out = out.copy()
+                out[aten.exponential.default] = bad_exp_decomp
+                return out
+
+            torch._inductor.compile_fx.select_decomp_table = get_decomp
+            try:
+                yield
+
+            finally:
+                torch._inductor.compile_fx.select_decomp_table = old_decomp
+
+        def vq(x):
+            return (x + 3).exponential_() * 10.5
+
+        def test_fn():
+            torch._dynamo.reset()
+            with patch_exp_decomp():
+                vq_compiled = torch.compile(vq)  # noqa: UNSPECIFIED_BACKEND
+                x = torch.randn(4, 400, 256, device=device)
+                with torch._dynamo.utils.preserve_rng_state():
+                    vq(x)
+                out_compiled = vq_compiled(x)
+
+            return not out_compiled.isnan().any()
+
+        out = CompilerBisector.do_bisect(test_fn)
+        self.assertEqual(out.backend, "aot_eager_decomp_partition")
+        self.assertEqual(out.subsystem, "decomposition")
+        self.assertEqual(out.bisect_number, 1)
+        self.assertTrue("aten.exponential" in out.debug_info)
 
     def test_emulate_precision_casts(self, device):
         def test_fn():
