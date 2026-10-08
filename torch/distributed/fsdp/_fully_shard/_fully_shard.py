@@ -967,8 +967,8 @@ class FSDPModule:
         once -- the copy-in (``chunk_cat``) buffer cap-K (experimental).
 
         FSDP keeps **1** such buffer in flight by default, so the compute stream
-        must wait on the previous reduce-scatter before the next copy-in can
-        reuse that buffer. When the reduce-scatter is exposed (communication
+        must wait until the previous buffer is no longer in use before the next
+        copy-in can reuse it. When the reduce-scatter is exposed (communication
         slower than the backward compute meant to hide it), that recycle wait
         stalls the compute stream. Raising the cap lets the next copy-in write a
         **fresh** buffer instead of waiting -- removing the stall -- at the cost

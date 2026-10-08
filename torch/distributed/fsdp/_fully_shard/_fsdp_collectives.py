@@ -630,27 +630,40 @@ def foreach_reduce(
     all_reduce_input = None
     all_reduce_event = None
 
+    # With no collective, the packed input already is the reduction output.
+    # Only reuse it for plain FSDP with built-in comms: custom comms may return a
+    # persistent input buffer, and HSDP's partial accumulation outlives the input.
+    reuse_input = (
+        world_size == 1
+        and all_reduce_group is None
+        and type(reduce_scatter_comm)
+        in (DefaultReduceScatter, ProcessGroupAllocReduceScatter, SymmMemReduceScatter)
+    )
     with device_handle.stream(reduce_scatter_stream):
-        reduce_output = reduce_scatter_comm.allocate(
-            (reduce_scatter_output_numel,),
-            dtype=reduce_dtype,
-            device=device,
-        )
         _div_if_needed(reduce_scatter_input, predivide_factor)
-        if world_size > 1:
-            reduce_scatter_comm(
-                output_tensor=reduce_output,
-                input_tensor=reduce_scatter_input,
-                group=reduce_scatter_group,
-                op=reduce_scatter_op,
-            )
+        if reuse_input:
+            reduce_output = reduce_scatter_input
+            _div_if_needed(reduce_output, gradient_divide_factor)
         else:
-            # For single GPU, just copy the input to output (no actual reduce-scatter needed), and
-            # account for a possible gradient_divide_factor.
-            if gradient_divide_factor is not None and gradient_divide_factor != 1.0:
-                reduce_output.copy_(reduce_scatter_input / gradient_divide_factor)
+            reduce_output = reduce_scatter_comm.allocate(
+                (reduce_scatter_output_numel,),
+                dtype=reduce_dtype,
+                device=device,
+            )
+            if world_size > 1:
+                reduce_scatter_comm(
+                    output_tensor=reduce_output,
+                    input_tensor=reduce_scatter_input,
+                    group=reduce_scatter_group,
+                    op=reduce_scatter_op,
+                )
             else:
-                reduce_output.copy_(reduce_scatter_input)
+                # For single GPU, just copy the input to output (no actual reduce-scatter needed), and
+                # account for a possible gradient_divide_factor.
+                if gradient_divide_factor is not None and gradient_divide_factor != 1.0:
+                    reduce_output.copy_(reduce_scatter_input / gradient_divide_factor)
+                else:
+                    reduce_output.copy_(reduce_scatter_input)
         reduce_scatter_event = reduce_scatter_stream.record_event()
         post_reduce_stream = reduce_scatter_stream
         if all_reduce_group is not None:  # HSDP or DDP/replicate
@@ -755,9 +768,10 @@ def foreach_reduce(
                     and not to_accumulate_grad
                     and not has_post_acc_grad_hook
                 )
-                # Since the GPU sharded gradient is allocated in the RS stream,
-                # we can free it here by not keeping a ref without waiting for
-                # the D2H copy since future RS-stream ops run after the copy
+                # Since the GPU sharded gradient is allocated in the RS stream
+                # (or a reused input is kept alive past the copy), we can free
+                # it here by not keeping a ref without waiting for the D2H copy
+                # since future RS-stream ops run after the copy
                 new_sharded_grad = new_sharded_grad.to(
                     torch.device("cpu"), non_blocking=non_blocking
                 )
@@ -783,9 +797,12 @@ def foreach_reduce(
                 hook(fsdp_param.sharded_param)
         post_reduce_event = post_reduce_stream.record_event()
     # The RS output is allocated in the RS stream and used in the default
-    # stream (for optimizer). To ensure its memory is not reused for later
-    # RSs, we do not need extra synchronization since the sharded parameters
-    # hold refs through the end of backward.
+    # stream (for optimizer); the sharded parameters hold refs through the end
+    # of backward, so its memory is not reused for later RSs. A reused input is
+    # instead allocated in the default stream and read by the post-reduce ops
+    # above, so keep it alive until they finish unless AllReduceState does.
+    if reuse_input and all_reduce_input is None:
+        reduce_scatter_event = post_reduce_event
     return (
         reduce_scatter_input,
         reduce_scatter_event,
