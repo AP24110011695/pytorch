@@ -2315,6 +2315,21 @@ class ExportedProgramSerializer(metaclass=Final):
         )
 
 
+# Namespaces of ops that public APIs put into saved programs but that torch
+# defines in Python modules `import torch` does not import. Load imports the
+# module before it looks up one of these ops. Some of these modules load
+# torch._dynamo, so only load imports them, not every torch.ops lookup, which
+# also runs for code that only checks whether an op exists.
+_OP_NAMESPACE_MODULES = {
+    "quantized_decomposed": "torch.ao.quantization.fx._decomposed",
+    "torch_attn": "torch.nn.attention.varlen",
+}
+# Without torch.distributed, pippy ops cannot exist, and load reports them as
+# unresolved like any other op.
+if torch.distributed.is_available():
+    _OP_NAMESPACE_MODULES["pippy"] = "torch.distributed.pipelining._IR"
+
+
 @final
 class GraphModuleDeserializer(metaclass=Final):
     @dataclasses.dataclass
@@ -2373,6 +2388,10 @@ class GraphModuleDeserializer(metaclass=Final):
         elif serialized_target.startswith("torch"):
             module = torch  # type: ignore[misc]
             serialized_target_names = serialized_target.split(".")[1:]
+            if serialized_target.startswith("torch.ops."):
+                namespace = serialized_target_names[1]
+                if namespace in _OP_NAMESPACE_MODULES:
+                    torch.ops.import_module(_OP_NAMESPACE_MODULES[namespace])
         elif serialized_target.startswith("math"):
             module = math  # type: ignore[misc]
             serialized_target_names = serialized_target.split(".")[1:]

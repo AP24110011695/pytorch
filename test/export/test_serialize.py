@@ -7,6 +7,9 @@ with test_sym_bool)
 import copy
 import io
 import math
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -2048,6 +2051,51 @@ class TestSaveLoad(TestCase):
         loaded_ep = load(buffer)
 
         self.assertTrue(torch.allclose(ep.module()(*inp), loaded_ep.module()(*inp)))
+
+    @unittest.skipIf(IS_FBCODE, "fbcode system python does not provide torch")
+    def test_load_torch_python_ops_in_new_process(self):
+        # These imports define the ops here. The new process below only imports torch.
+        import torch.ao.quantization.fx._decomposed
+        from torch.nn.attention.varlen import varlen_attn
+
+        with_pipelining = torch.distributed.is_available()
+        if with_pipelining:
+            from torch.distributed.pipelining import pipe_split
+
+        class M(torch.nn.Module):
+            def forward(self, q, cu, x):
+                attn = varlen_attn(q, q, q, cu, cu, 4, 4)
+                if with_pipelining:
+                    pipe_split()
+                x_int8 = torch.ops.quantized_decomposed.quantize_per_tensor(
+                    x, 0.5, 0, -128, 127, torch.int8
+                )
+                return attn, x_int8
+
+        inp = (
+            torch.randn(8, 2, 16, dtype=torch.bfloat16),
+            torch.tensor([0, 4, 8], dtype=torch.int32),
+            torch.randn(4),
+        )
+        ep = export(M(), inp)
+        ops = sorted({str(n.target) for n in ep.graph.nodes if n.op == "call_function"})
+        with TemporaryFileName(suffix=".pt2") as path:
+            save(ep, path)
+            script = (
+                "import torch;"
+                f"ep = torch.export.load({path!r});"
+                "print(sorted({str(n.target) for n in ep.graph.nodes"
+                " if n.op == 'call_function'}))"
+            )
+            p = subprocess.run(
+                [sys.executable, "-c", script],
+                cwd=os.path.dirname(os.path.realpath(__file__)),
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stdout.strip().splitlines()[-1], str(ops))
 
     def test_deserialize_torch_artifact_dict(self):
         data = {"key": torch.tensor([1, 2, 3])}
