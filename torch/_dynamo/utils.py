@@ -3048,6 +3048,13 @@ if has_triton_package():
 """
 
 
+def is_identity_singleton(value: object) -> bool:
+    """Constants whose process-wide identity does not depend on their source."""
+    return any(
+        value is item for item in (None, True, False, Ellipsis, NotImplemented)
+    ) or istype(value, (torch.dtype, torch.layout, torch.memory_format))
+
+
 def is_safe_constant(v: object) -> bool:
     if istype(v, (tuple, frozenset)):
         return all(map(is_safe_constant, v))
@@ -3379,14 +3386,6 @@ def to_subclass(t: Any, cls: type) -> Any:
 
 
 dict_getitem = dict.__getitem__
-
-
-@torch.fx.wrap
-def dict_keys_getitem(d: dict[Any, Any], n: int) -> Any:
-    # Use dict.keys() to match the iteration order of PyDict_Next used by
-    # the C++ DictGuardManager and by ConstDictKeySource._name_template.
-    # pyrefly: ignore [bad-argument-type]
-    return next(itertools.islice(dict.keys(d), n, n + 1))
 
 
 def set_base_iter(s: Iterable[T]) -> Iterator[T]:
