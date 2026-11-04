@@ -401,7 +401,13 @@ class HashableTracker:
 
     _MISSING = object()
 
-    def __init__(self, vt: VariableTracker) -> None:
+    def __init__(self, vt: VariableTracker, *, known_hash: int | None = None) -> None:
+        if known_hash is not None:
+            # Only exact-int hook IDs use a hash from the source dictionary.
+            # Keep them lazy until user code observes the key or its hash.
+            self.vt = vt
+            self._hash, self._hash_is_identity = known_hash, False
+            return
         # We specialize SymNodes
         vt = specialize_symnode(vt)
         if type(vt) is variables.ConstantVariable and (

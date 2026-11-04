@@ -5648,6 +5648,8 @@ class UserDefinedFrozensetVariable(UserDefinedObjectVariable, FrozensetVariable)
             if init_args:
                 arg = init_args[0]
                 if isinstance(arg, (SetVariable, ConstDictVariable)):
+                    if isinstance(arg, ConstDictVariable):
+                        arg.materialize_keys()
                     items = list(arg.items.keys())
                 else:
                     items = unpack_iterable(tx, arg)

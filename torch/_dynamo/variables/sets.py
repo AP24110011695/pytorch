@@ -289,6 +289,7 @@ class BaseSetVariable(VariableTracker):
 
         if isinstance(other, ConstDictVariable):
             other.install_dict_order_guard(tx)
+            other.materialize_keys()
         if isinstance(other, (BaseSetVariable, ConstDictVariable)):
             guard_key_collisions(self.items, other.items)
             yield from other.items.keys()
@@ -307,6 +308,7 @@ class BaseSetVariable(VariableTracker):
 
         if isinstance(other, ConstDictVariable):
             other.install_dict_order_guard(tx)
+            other.materialize_keys()
         if isinstance(other, (BaseSetVariable, ConstDictVariable)):
             keys = list(other.items.keys())
         else:
@@ -1454,6 +1456,7 @@ class DictKeySetVariable(BaseSetVariable):
 
         if isinstance(vt, ConstDictVariable):
             vt.install_dict_order_guard(tx)
+            vt.materialize_keys()
         if isinstance(vt, (BaseSetVariable, ConstDictVariable)):
             items: list[Any] = list(vt.items.keys())
         else:

@@ -2662,6 +2662,7 @@ class BuiltinVariable(BaseBuiltinVariable):
         # path (do-not-rehash-dict-keys).
         if isinstance(args[0], variables.ConstDictVariable):
             args[0].install_dict_order_guard(tx)
+            args[0].materialize_keys()
         if isinstance(
             args[0],
             (
