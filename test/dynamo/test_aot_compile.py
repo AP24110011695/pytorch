@@ -7844,13 +7844,89 @@ from user code:
         (result,) = compiled.compiled_results
         self.assertFalse(result._has_global_guards)
 
-    def test_aot_compile_module_key_order_only_global_is_not_read_live(self):
-        # A global certified by nothing but a guard_on_key_order entry. Iterating
-        # a module-level dict roots its TYPE_MATCH and its key-order check at the
-        # same GlobalSource, the default filter drops the guard for being global,
-        # and guard_filter_fn never prunes the key-order set -- so no kept guard
-        # checks these tensors and the pick must leave the name alone. Reading it
-        # live would serve values nothing ever compared against.
+    @parametrize("retain", [False, True])
+    def test_aot_compile_dictionary_order_metadata_follows_filter(self, retain):
+        class Module(torch.nn.Module):
+            def forward(self, x, mapping):
+                return x + next(iter(mapping.values()))
+
+        def guard_filter(entries):
+            return [retain or "mapping" not in entry.name for entry in entries]
+
+        x, mapping = torch.ones(1), {"a": 2, "b": 3}
+        model = torch.compile(
+            Module(),
+            backend="eager",
+            fullgraph=True,
+            options={"guard_filter_fn": guard_filter},
+        )
+        model._aot_compile([ModelInput(args=(x, mapping), kwargs={}, contexts=[])])
+        (captured,) = model.forward.compiled_results
+        state = load_guards_state(captured._artifacts.guards_state).output_graph
+        self.assertEqual(
+            {source.name for source in state.guard_on_key_order},
+            {"L['mapping']"} if retain else set(),
+        )
+        self.assertEqual(model(x, mapping), x + 2)
+        data = model._save_aot_compiled_module()
+        loaded = torch.compile(Module(), backend="eager", fullgraph=True)
+        loaded._load_aot_compiled_module(data)
+        self.assertEqual(loaded(x, mapping), x + 2)
+        reordered = {"b": 3, "a": 2}
+        if retain:
+            with self.assertRaisesRegex(RuntimeError, "No AOT compiled graph matched"):
+                loaded(x, reordered)
+        else:
+            self.assertEqual(loaded(x, reordered), x + 2)
+
+    @parametrize("member", ["mapping", "weight"])
+    def test_aot_compile_implicit_module_dictionary_order_alias(self, member):
+        global AOT_IMPLICIT_ORDER_ROOT
+
+        class Module(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.mapping = {"a": 1, "b": 2}
+                self.weight = torch.nn.Parameter(torch.ones(1))
+                self.bias = torch.nn.Parameter(torch.zeros(1))
+
+            def forward(self, x):
+                return x + len(tuple(AOT_IMPLICIT_ORDER_ROOT)) + hasattr(self, member)
+
+        module = Module()
+        AOT_IMPLICIT_ORDER_ROOT = (
+            module.mapping if member == "mapping" else module._parameters
+        )
+        self.addCleanup(globals().pop, "AOT_IMPLICIT_ORDER_ROOT", None)
+
+        def guard_filter(entries):
+            return [
+                entry.guard_type == "HASATTR" or entry.guard_type == "TENSOR_MATCH"
+                for entry in entries
+            ]
+
+        x = torch.ones(1)
+        model = torch.compile(
+            module,
+            backend="eager",
+            fullgraph=True,
+            options={"guard_filter_fn": guard_filter},
+        )
+        model._aot_compile([ModelInput(args=(x,), kwargs={}, contexts=[])])
+        (captured,) = model.forward.compiled_results
+        state = load_guards_state(captured._artifacts.guards_state).output_graph
+        self.assertEqual(
+            {source.name for source in state.guard_on_key_order},
+            {"G['AOT_IMPLICIT_ORDER_ROOT']"},
+        )
+        self.assertIn("AOT_IMPLICIT_ORDER_ROOT", state.global_scope)
+        data = model._save_aot_compiled_module()
+        loaded = torch.compile(Module(), backend="eager", fullgraph=True)
+        loaded._load_aot_compiled_module(data)
+        self.assertEqual(loaded(x), x + 3)
+
+    def test_aot_compile_module_captured_global_is_not_read_live(self):
+        # Dropping global guards and order metadata must preserve captured values.
         from torch._dynamo.source import get_global_source_name
 
         global AOT_KEY_ORDER_GLOBAL
@@ -7876,11 +7952,9 @@ from user code:
         ko_sources = output_graph.guard_on_key_order
         key_order = {get_global_source_name(source) for source in ko_sources}
         self.assertNotIn("AOT_KEY_ORDER_GLOBAL", own)
-        self.assertIn("AOT_KEY_ORDER_GLOBAL", key_order)
-        # Armed and not vacuous: the name is in the serialized global_scope that
-        # arms the pick, and the graph carries the value the narrowing keeps
-        # serving instead.
-        self.assertIn("AOT_KEY_ORDER_GLOBAL", output_graph.global_scope)
+        self.assertNotIn("AOT_KEY_ORDER_GLOBAL", key_order)
+        # Captured tensor inputs survive even when no guard reads this global.
+        self.assertNotIn("AOT_KEY_ORDER_GLOBAL", output_graph.global_scope)
         used_globals = captured._artifacts.runtime_env.used_globals
         self.assertIn("AOT_KEY_ORDER_GLOBAL", used_globals)
 
@@ -7895,7 +7969,7 @@ from user code:
         reloaded._load_aot_compiled_module(data)
         (result,) = reloaded.forward.compiled_results
         self.assertIs(result._guard_scope, _GuardScope.SUPPLIED)
-        self.assertTrue(result._has_global_guards)
+        self.assertFalse(result._has_global_guards)
         actual = reloaded(x)
         self.assertEqual(actual, expected)
         live = x + AOT_KEY_ORDER_GLOBAL["a"] + AOT_KEY_ORDER_GLOBAL["b"]

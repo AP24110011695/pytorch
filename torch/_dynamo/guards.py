@@ -1939,6 +1939,9 @@ class GuardBuilder(GuardBuilderBase):
                 if not issubclass(example_type, dict):
                     raise AssertionError(f"Expected dict, got {type(example_value)}")
                 guard_manager_enum = GuardManagerType.DICT_GUARD_MANAGER
+        if guard_manager_enum == GuardManagerType.DICT_GUARD_MANAGER:
+            # Module attribute access can build this manager without a source lookup.
+            self.guard_tree_values[id(example_value)] = example_value
         return guard_manager_enum
 
     def manager_guards_on_keys(self, mgr_enum: GuardManagerType) -> bool:
@@ -6395,6 +6398,12 @@ class CheckFunctionManager:
                 used_local_vars.add(name)
 
         output_graph_guards_state = output_graph.dump_guards_state()
+        # Retain sources whose object has a kept manager, including aliased bases.
+        retained_order_sources = {
+            source
+            for source in output_graph_guards_state.guard_on_key_order
+            if id(builder.get(source)) in builder.guard_tree_values
+        }
         # Only serialize the global variables that are actually used in guards.
         for guard in sorted_guards:
             if isinstance(guard.originating_source, ShapeEnvSource):
@@ -6407,7 +6416,7 @@ class CheckFunctionManager:
             else:
                 prune_variable(guard.originating_source)
 
-        for source in output_graph.guard_on_key_order:
+        for source in retained_order_sources:
             prune_variable(source)
 
         def normalize_create_fn(x: Callable[..., None]) -> Callable[..., None]:
@@ -6466,6 +6475,7 @@ class CheckFunctionManager:
                     for guard in sorted_guards
                 )
             ),
+            guard_on_key_order=retained_order_sources,
             input_source_to_sizes_strides=pytree.tree_map(
                 convert_int_to_concrete_values,
                 output_graph_guards_state.input_source_to_sizes_strides,
