@@ -5469,8 +5469,8 @@ class GuardsStatePickler(FunctionPicklerBase):
             actual_attrs = vars(obj)
             adopt_attrs = state is actual_attrs or (
                 isinstance(state, tuple)
-                and len(state) == 2
-                and state[0] is actual_attrs
+                and tuple.__len__(state) == 2
+                and tuple.__getitem__(state, 0) is actual_attrs
             )
             return (
                 reduced[0],

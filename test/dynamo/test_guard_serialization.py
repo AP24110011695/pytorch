@@ -1588,6 +1588,16 @@ class _ODictGetState(collections.OrderedDict):
         return {"saved": self.saved} if self.saved is not None else None
 
 
+class _ODictTupleState(tuple):
+    __slots__ = ()
+
+    def __len__(self):
+        raise AssertionError("State inspection must bypass tuple overrides")
+
+    def __getitem__(self, index):
+        raise AssertionError("State inspection must bypass tuple overrides")
+
+
 class _ODictCustomState(_ODictGetState):
     def __getstate__(self):
         return self.saved
@@ -1648,7 +1658,18 @@ class TestGuardsStatePickler(torch._inductor.test_case.TestCase):
         return load_guards_state(buf.getvalue())
 
     @parametrize(
-        "state", [None, 0, "", (), {}, {"saved": 3}, ({}, {}), ({"saved": 3}, {})]
+        "state",
+        [
+            None,
+            0,
+            "",
+            (),
+            {},
+            {"saved": 3},
+            ({}, {}),
+            ({"saved": 3}, {}),
+            _ODictTupleState(({"saved": 3}, {})),
+        ],
     )
     def test_ordered_dict_custom_state_matches_pickle(self, state):
         mapping = _ODictCustomState()
@@ -1661,7 +1682,9 @@ class TestGuardsStatePickler(torch._inductor.test_case.TestCase):
             return
         loaded, saved = self._roundtrip_ordered_dict((mapping, state), mapping, state)
         self.assertEqual(vars(loaded), vars(expected))
-        self.assertEqual(saved, state)
+        self.assertEqual(tuple(saved), tuple(state)) if isinstance(
+            state, _ODictTupleState
+        ) else self.assertEqual(saved, state)
         if type(state) is dict:
             self.assertIsNot(vars(loaded), saved)
 
@@ -5191,6 +5214,45 @@ class TestGuardSerialization(TestGuardSerializationBase):
             False,
         )
         self._test_check_fn(ref, loaded, {"x": {"a": torch.randn(3, 2)}}, False)
+
+    def test_nn_module_hook_order_serialization(self):
+        def fn(x, module):
+            for hook in module._forward_hooks.values():
+                x = hook(x)
+            return x
+
+        module = torch.nn.Identity()
+        module._forward_hooks.update({1: torch.sin, 2: torch.cos})
+        x = torch.ones(2)
+        ref, loaded = self._test_serialization(
+            "ORDERED_DICT_ORDER_MATCH", fn, x, module
+        )
+        fresh = torch.nn.Identity()
+        fresh._forward_hooks.update({3: torch.sin, 4: torch.cos})
+        inputs = {"x": x, "module": fresh}
+        self._test_check_fn(ref, loaded, inputs, True)
+        fresh._forward_hooks.move_to_end(3)
+        self._test_check_fn(ref, loaded, inputs, False)
+
+    @parametrize("reordered", [False, True])
+    @parametrize("mapping_type", [collections.OrderedDict, _ODictSubclass])
+    def test_ordered_dict_iteration_order(self, reordered, mapping_type):
+        def fn(x, mapping):
+            return x + sum(mapping.values())
+
+        x = torch.ones(2)
+        mapping = mapping_type(a=1, b=2)
+        if reordered:
+            mapping.move_to_end("a")
+        ref, loaded = self._test_serialization(
+            "ORDERED_DICT_ORDER_MATCH", fn, x, mapping
+        )
+        order = (1, 0) if reordered else (0, 1)
+        self.assertIn(f"== {order!r}", str(ref))
+        self.assertIn(f"== {order!r}", str(loaded))
+        self._test_check_fn(ref, loaded, {"x": x, "mapping": mapping}, True)
+        mapping.move_to_end("b" if reordered else "a")
+        self._test_check_fn(ref, loaded, {"x": x, "mapping": mapping}, False)
 
     @parametrize("with_kwargs", [False, True])
     def test_forward_pre_hook_membership(self, with_kwargs):
