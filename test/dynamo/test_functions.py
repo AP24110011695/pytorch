@@ -7651,6 +7651,7 @@ class GraphModule(torch.nn.Module):
             "compare",
             "multi_union",
             "frozen_multi_union",
+            "dict_compare",
         ],
     )
     def test_bound_builtin_method_cross_container_collisions(self, operation):
@@ -7665,6 +7666,8 @@ class GraphModule(torch.nn.Module):
             if operation in ("multi_union", "frozen_multi_union"):
                 kind = frozenset if operation == "frozen_multi_union" else set
                 return x + len(kind().union({key}, {method}))
+            if operation == "dict_compare":
+                return x + ({method: 1} == {key: 1})
             left, right = {method}, {key}
             if operation == "compare":
                 return x + (left == right)
