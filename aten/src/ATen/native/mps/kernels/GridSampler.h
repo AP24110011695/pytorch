@@ -18,6 +18,7 @@ enum class GridSamplerPadding : int32_t {
 #else
 #include <ATen/native/GridSamplerUtils.h>
 #include <ATen/native/Pool.h>
+#include <c10/util/safe_conv.h>
 using at::native::GridSamplerInterpolation;
 using at::native::GridSamplerPadding;
 #endif
@@ -38,20 +39,22 @@ struct GridSamplerParams {
       const at::TensorBase& output,
       const at::TensorBase& input,
       const at::TensorBase& grid,
-      bool align_corners_)
+      bool align_corners_,
+      const char* output_size_name = "output.size(dim)",
+      const char* output_stride_name = "output.stride(dim)")
       : sampler_dims(N - 2), align_corners(align_corners_) {
     for (unsigned dim = 0; dim < N; dim++) {
       output_sizes[dim] =
-          c10::checked_convert<idx_t>(output.size(dim), "int32_t");
+          c10::safe_conv<idx_t>(output.size(dim), output_size_name);
       output_strides[dim] =
-          c10::checked_convert<idx_t>(output.stride(dim), "int32_t");
+          c10::safe_conv<idx_t>(output.stride(dim), output_stride_name);
       input_sizes[dim] =
-          c10::checked_convert<idx_t>(input.size(dim), "int32_t");
+          c10::safe_conv<idx_t>(input.size(dim), "input.size(dim)");
       input_strides[dim] =
-          c10::checked_convert<idx_t>(input.stride(dim), "int32_t");
-      grid_sizes[dim] = c10::checked_convert<idx_t>(grid.size(dim), "int32_t");
+          c10::safe_conv<idx_t>(input.stride(dim), "input.stride(dim)");
+      grid_sizes[dim] = c10::safe_conv<idx_t>(grid.size(dim), "grid.size(dim)");
       grid_strides[dim] =
-          c10::checked_convert<idx_t>(grid.stride(dim), "int32_t");
+          c10::safe_conv<idx_t>(grid.stride(dim), "grid.stride(dim)");
     }
   }
 #endif
@@ -78,20 +81,26 @@ struct GridSamplerBackwardParams {
       bool align_corners,
       GridSamplerPadding padding_mode_,
       GridSamplerInterpolation interpolation_mode_)
-      : forward(grad_output, input, grid, align_corners),
+      : forward(
+            grad_output,
+            input,
+            grid,
+            align_corners,
+            "grad_output.size(dim)",
+            "grad_output.stride(dim)"),
         padding_mode(padding_mode_),
         interpolation_mode(interpolation_mode_),
         compute_grad_input(grad_input.defined()),
         compute_grad_grid(
             interpolation_mode_ != GridSamplerInterpolation::Nearest) {
     for (unsigned dim = 0; dim < N; dim++) {
-      grad_output_strides[dim] =
-          c10::checked_convert<idx_t>(grad_output.stride(dim), "int32_t");
+      grad_output_strides[dim] = forward.output_strides[dim];
       grad_input_strides[dim] = grad_input.defined()
-          ? c10::checked_convert<idx_t>(grad_input.stride(dim), "int32_t")
+          ? c10::safe_conv<idx_t>(
+                grad_input.stride(dim), "grad_input.stride(dim)")
           : 0;
       grad_grid_strides[dim] =
-          c10::checked_convert<idx_t>(grad_grid.stride(dim), "int32_t");
+          c10::safe_conv<idx_t>(grad_grid.stride(dim), "grad_grid.stride(dim)");
     }
   }
 #endif
