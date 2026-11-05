@@ -1242,9 +1242,13 @@ class AOTAutogradCache(GuardedCache[GenericAOTAutogradResult[Any, Any]]):
             cache_key, debug_lines = autograd_cache_key(
                 mod, args, aot_config, compiler_config_extra, act_input_paths
             )
-            result = AOTAutogradCache._lookup(
-                cache_key, local, remote, args, cache_info, aot_config
-            )
+            wrapper = config.compiled_graph_wrapper
+            if wrapper is None:
+                wrapper = torch._utils_internal.get_compiled_graph_wrapper()
+            if wrapper is None:
+                result = AOTAutogradCache._lookup(
+                    cache_key, local, remote, args, cache_info, aot_config
+                )
         except Exception as e:
             record_bypass(e)
 
