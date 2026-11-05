@@ -797,11 +797,15 @@ class CppOverrides(OpOverrides):
     @staticmethod
     # pyrefly: ignore [bad-override]
     def sqrt(x):
+        if config.cpp.sqrt_without_errno:
+            return f"sqrt_without_errno({x})"
         return f"std::sqrt({x})"
 
     @staticmethod
     # pyrefly: ignore [bad-override]
     def rsqrt(x):
+        if config.cpp.sqrt_without_errno:
+            return f"1 / sqrt_without_errno({x})"
         return f"1 / std::sqrt({x})"
 
     @staticmethod
