@@ -272,8 +272,8 @@ def should_reinplace_scatter(node: torch.fx.Node) -> bool:
     ):
         return True
 
-    # Otherwise, assume fusions will make functional variants profitable
-    return False
+    # If aggressive reinplacement is off, refrain from reinplacement for fusion opportunities.
+    return config.reinplace_whenever_possible
 
 
 def should_reinplace_all_reduce(node: torch.fx.Node) -> bool:

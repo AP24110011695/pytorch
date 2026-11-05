@@ -7,13 +7,19 @@ import torch._inductor.config as inductor_config
 from functorch import make_fx
 from torch import Tensor
 from torch._dynamo.utils import ReinplaceCounters
+from torch._guards import detect_fake_mode
 from torch._higher_order_ops.auto_functionalize import (
     auto_functionalized,
     auto_functionalized_v2,
 )
 from torch._inductor import inductor_prims
-from torch._inductor.fx_passes.reinplace import reinplace_inplaceable_ops_core
+from torch._inductor.fx_passes.reinplace import (
+    reinplace_inplaceable_ops,
+    reinplace_inplaceable_ops_core,
+)
+from torch._inductor.fx_utils import FakeTensorUpdater
 from torch._inductor.test_case import run_tests, TestCase as InductorTestCase
+from torch._inductor.virtualized import V
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     IS_LINUX,
@@ -569,6 +575,35 @@ class TestReinplacingPassCorrectness(InductorTestCase):
 
             # Both list inputs failed to reinplace. So we should have emitted clones for them.
             self.assertEqual(post_grad_graphs.count("aten.clone"), 2)
+
+    @parametrize("reinplace_whenever_possible", [False, True])
+    def test_scatter_reinplace_whenever_possible(self, reinplace_whenever_possible):
+        def f(x, value):
+            base = x.sin()
+            updated = aten.select_scatter.default(base, value, 0, 1)
+            return updated.cos()
+
+        inputs = (torch.randn(2, 4), torch.randn(4))
+        gm = make_fx(f, tracing_mode="fake")(*inputs)
+        fake_mode = detect_fake_mode([node.meta.get("val") for node in gm.graph.nodes])
+        with (
+            inductor_config.patch(
+                reinplace_whenever_possible=reinplace_whenever_possible
+            ),
+            V.set_fake_mode(fake_mode),
+        ):
+            reinplace_inplaceable_ops(FakeTensorUpdater(gm), gm.graph)
+        gm.graph.lint()
+        gm.recompile()
+
+        targets = [node.target for node in gm.graph.nodes]
+        if reinplace_whenever_possible:
+            self.assertIn(aten.copy_.default, targets)
+            self.assertNotIn(aten.select_scatter.default, targets)
+        else:
+            self.assertIn(aten.select_scatter.default, targets)
+            self.assertNotIn(aten.copy_.default, targets)
+        self.assertEqual(gm(*inputs), f(*inputs))
 
     def test_generalized_scatter(self):
         # This is an integration test for the reinplacing pass.

@@ -291,6 +291,9 @@ pick_loop_orders = True
 # reuse a kernel input as the output
 inplace_buffers = True
 
+# ignore profitability heuristics and reinplace mutation operators whenever possible
+reinplace_whenever_possible = False
+
 # reuse a buffer for an unrelated purpose
 allow_buffer_reuse = lite_mode_default(False, True)
 
