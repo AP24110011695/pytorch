@@ -53,7 +53,6 @@ from .. import config, graph_break_hints, variables
 from .._trace_wrapped_higher_order_op import trace_wrapped
 from ..exc import (
     format_user_stack,
-    ObservedAttributeError,
     raise_observed_exception,
     raise_type_error,
     raise_value_error,
@@ -820,6 +819,15 @@ class TensorVariable(VariableTracker):
             return VariableTracker.build(tx, self.is_nested)
         return None
 
+    def method_attr_imag(self, tx: "InstructionTranslatorBase") -> None:
+        # Tracing getattr(x, "imag") would raise this TypeError inside the fake
+        # tensor call, where user code cannot catch it.
+        if self.dtype is not None and not self.dtype.is_complex:
+            raise_type_error(
+                tx, "imag is not implemented for tensors with non-complex dtypes."
+            )
+        return None
+
     def method_attr_retain_grad(self, tx: "InstructionTranslatorBase") -> NoReturn:
         unimplemented(
             gb_type="Tensor.retain_grad() with AOTDispatcher",
@@ -865,37 +873,6 @@ class TensorVariable(VariableTracker):
         return _create_internal_torch_function(_tensor_version).call_function(
             tx, [self], {}
         )
-
-    def call_obj_hasattr(
-        self, tx: "InstructionTranslatorBase", name: str
-    ) -> ConstantVariable:
-        from . import GetAttrVariable
-
-        # TODO - This is not a good solution but solves an accuracy issue.
-        # Today, tp_getattro_impl returns GetAttrVariable for both non-existent
-        # attributes and existing attributes. This is a bug and requires more
-        # deep dive.
-        if name in all_tensor_attrs:
-            return ConstantVariable.create(True)
-
-        try:
-            var = VariableTracker.build(tx, getattr).call_function(
-                tx, [self, VariableTracker.build(tx, name)], {}
-            )
-            # in the event that TensorVariable returns NotImplemented
-            # GetAttrBuiltinVariable.call_function returns GetAttrVariable
-            ret_val = not isinstance(var, GetAttrVariable)
-        except (AttributeError, ObservedAttributeError):
-            ret_val = False
-
-        if self.source:
-            install_guard(
-                self.source.make_guard(
-                    functools.partial(GuardBuilder.HASATTR, attr=name)
-                )
-            )
-
-        return VariableTracker.build(tx, ret_val)
 
     def tp_getattro_impl(
         self, tx: "InstructionTranslatorBase", name: str

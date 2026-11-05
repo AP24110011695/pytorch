@@ -11,6 +11,7 @@ import abc
 import collections
 import contextlib
 import enum
+import functools
 import operator
 import sys
 import types
@@ -32,11 +33,13 @@ from torch._C._dynamo import (
 from .. import config, graph_break_hints, polyfills, variables
 from ..exc import (
     handle_observed_exception,
+    ObservedAttributeError,
     ObservedTypeError,
     raise_observed_exception,
     raise_type_error,
     UnhandledDescriptorError,
     unimplemented,
+    Unsupported,
 )
 from ..guards import GuardBuilder, install_guard
 from ..source import (
@@ -2542,12 +2545,7 @@ def generic_getattr(
 
     # Handle default for getattr(obj, name, default).
     if default is not _NO_DEFAULT:
-        hasattr_var = obj.call_obj_hasattr(tx, name)
-        if not hasattr_var.is_constant_match(True, False):
-            raise AssertionError(
-                f"hasattr_var must be a constant True or False, got {hasattr_var}"
-            )
-        if not hasattr_var.as_python_constant():
+        if not generic_hasattr_str(tx, obj, name):
             return default  # type: ignore[return-value]
 
     # tp_getset/tp_members are data descriptors: resolve ahead of the VT's
@@ -2566,3 +2564,99 @@ def generic_getattr(
         raise
     except NotImplementedError:
         return variables.GetAttrVariable(obj, name, source=source)
+
+
+def generic_hasattr(
+    tx: "InstructionTranslatorBase",
+    obj: VariableTracker,
+    name: VariableTracker,
+) -> ConstantVariable:
+    """Dynamo's PyObject_HasAttr: validate the name, then delegate.
+
+    https://github.com/python/cpython/blob/848cb25624ab44c9fef2966c777419376b65af1b/Objects/object.c#L1414
+    """
+    if not issubclass(name.python_type(), str):
+        raise_type_error(
+            tx, f"attribute name must be string, not '{name.python_type_name()}'"
+        )
+    attr_name = name.as_python_constant()
+    return ConstantVariable.create(generic_hasattr_str(tx, obj, attr_name))
+
+
+def generic_hasattr_str(
+    tx: "InstructionTranslatorBase",
+    obj: VariableTracker,
+    name: str,
+) -> bool:
+    """Dynamo's PyObject_GetOptionalAttrString: call tp_getattro, suppress AttributeError.
+
+    CPython has no tp_hasattr slot. hasattr() is PyObject_GetOptionalAttr over
+    tp_getattro, so it cannot disagree with getattr();
+    https://github.com/python/cpython/blob/848cb25624ab44c9fef2966c777419376b65af1b/Objects/object.c#L1321
+    """
+    if tx.output.side_effects.has_pending_mutation_of_attr(obj, name):
+        value = tx.output.side_effects.load_attr(obj, name, deleted_ok=True)
+        return not isinstance(value, variables.DeletedVariable)
+
+    try:
+        # A GetAttrVariable means the read was deferred, not resolved, so it is
+        # no evidence the attribute exists; fall through to the probe below.
+        # A lazy VT wraps a real value, and realizing it would install guards
+        # on a value hasattr never reads.
+        value = obj.tp_getattro_impl(tx, name)
+        if isinstance(value, variables.LazyVariableTracker) or not isinstance(
+            value, variables.GetAttrVariable
+        ):
+            # A True answer needs no guard of its own: tp_getattro_impl
+            # installed whatever guards the read it performed depends on.
+            if obj.source:
+                install_guard(
+                    obj.source.make_guard(
+                        functools.partial(GuardBuilder.HASATTR, attr=name)
+                    )
+                )
+            return True
+    except ObservedAttributeError:
+        tx.exn_vt_stack.clear_current_exception()
+        # No CPython analogue. A False answer rests on the attribute staying
+        # absent, and nothing else guards that.
+        if obj.source:
+            install_guard(
+                obj.source.make_guard(
+                    functools.partial(GuardBuilder.HASATTR, attr=name)
+                )
+            )
+        return False
+    except (NotImplementedError, Unsupported):
+        pass
+
+    # tp_getattro_impl could not resolve the name. generic_getattr would defer
+    # by wrapping it in a GetAttrVariable, which is indistinguishable from a
+    # missing attribute, so ask the concrete object (or its type) instead.
+    probe = NO_SUCH_SUBOBJ
+    for get_probe in (obj.get_real_python_backed_value, obj.python_type):
+        try:
+            probe = get_probe()
+        except (NotImplementedError, AttributeError):
+            continue
+        if probe is not NO_SUCH_SUBOBJ:
+            break
+    if probe is not NO_SUCH_SUBOBJ:
+        found = hasattr(probe, name)
+        if not found and obj.source:
+            install_guard(
+                obj.source.make_guard(
+                    functools.partial(GuardBuilder.HASATTR, attr=name)
+                )
+            )
+        return found
+
+    unimplemented(
+        gb_type="Unsupported hasattr call",
+        context=f"generic_hasattr {obj} {name}",
+        explanation=f"Dynamo does not know how to trace the function `{obj.debug_repr()}`",
+        hints=[
+            f"Avoid calling `hasattr({obj.__class__.__name__}, {name})` in your code.",
+            *graph_break_hints.SUPPORTABLE,
+        ],
+    )

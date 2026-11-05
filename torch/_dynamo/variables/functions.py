@@ -732,24 +732,6 @@ class BaseUserFunctionVariable(VariableTracker):
             allow_nested_graph_breaks=True,
         )
 
-    def call_obj_hasattr(
-        self, tx: "InstructionTranslatorBase", name: str
-    ) -> ConstantVariable:
-        se_result = self._hasattr_check_side_effects(tx, name)
-        if se_result is not None:
-            return se_result
-
-        result = False
-
-        if name in fn_known_dunder_attrs or name == "__dict__":
-            result = True
-        else:
-            try:
-                result = hasattr(self.get_function(), name)  # type: ignore[attr-defined]
-            except NotImplementedError:
-                result = False
-        return VariableTracker.build(tx, result)
-
     def closure_vars(
         self, tx: "InstructionTranslatorBase"
     ) -> dict[str, VariableTracker]:
@@ -1687,13 +1669,6 @@ class LocalGeneratorObjectVariable(VariableTracker):
     def tp_iternext_impl(self, tx: "InstructionTranslatorBase") -> VariableTracker:
         # ref: https://github.com/python/cpython/blob/v3.13.3/Objects/genobject.c#L832
         return self.gen_send_ex2(tx, ConstantVariable.create(None), False)
-
-    def call_obj_hasattr(
-        self, tx: "InstructionTranslatorBase", name: str
-    ) -> ConstantVariable:
-        if name in self.python_type().__dict__:
-            return ConstantVariable.create(True)
-        return ConstantVariable.create(False)
 
     def tp_iter_impl(self, tx: "InstructionTranslatorBase") -> VariableTracker:
         # ref: https://github.com/python/cpython/blob/v3.13.3/Objects/genobject.c#L831
@@ -2787,18 +2762,6 @@ class NestedUserFunctionVariable(BaseUserFunctionVariable):
             d = getattr(self, "defaults", None)
             return d.as_python_constant() if d else None
         return super().const_getattr(tx, name)
-
-    def call_obj_hasattr(
-        self, tx: "InstructionTranslatorBase", name: str
-    ) -> ConstantVariable:
-        if name == "__code__":
-            return VariableTracker.build(tx, hasattr(self, "code"))
-        if name == "__defaults__":
-            return VariableTracker.build(tx, hasattr(self, "defaults"))
-        vt = ConstantVariable.create(name)
-        if vt in self.get_dict_vt(tx):
-            return ConstantVariable.create(True)
-        return super().call_obj_hasattr(tx, name)
 
     def has_self(self) -> bool:
         return False
@@ -4195,12 +4158,6 @@ class FunctoolsPartialVariable(VariableTracker):
         merged_kwargs = {**self.keywords, **kwargs}
         return self.func.call_function(tx, merged_args, merged_kwargs)
 
-    def call_obj_hasattr(
-        self, tx: "InstructionTranslatorBase", name: str
-    ) -> ConstantVariable:
-        # functools.partial uses slots, so attributes are constant
-        return VariableTracker.build(tx, hasattr(functools.partial(identity), name))
-
     # func / args / keywords are read-only members on partial objects.
     # https://github.com/python/cpython/blob/v3.13.0/Modules/_functoolsmodule.c#L295-L299
     def _get_func(self, tx: "InstructionTranslatorBase") -> VariableTracker:
@@ -4227,6 +4184,8 @@ class FunctoolsPartialVariable(VariableTracker):
         try:
             return super().tp_getattro_impl(tx, name)
         except NotImplementedError:
+            if hasattr(functools.partial(identity), name):
+                raise
             raise_observed_exception(AttributeError, tx, args=[name])
 
     def as_python_constant(self) -> Any:
