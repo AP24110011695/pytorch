@@ -565,8 +565,10 @@ class CPUReproTests(TestCase):
             torch._dynamo.reset()
             opt_fn = torch.compile(fn, backend="inductor")
             actual, code = run_and_get_cpp_code(opt_fn, v)
-        FileCheck().check("transpose_mxn").run(code)
-        FileCheck().check("atomic_add_vec").run(code)
+        if not config.avoid_modular_indexing:
+            # the realized permute + reshape changes the generated kernels
+            FileCheck().check("transpose_mxn").run(code)
+            FileCheck().check("atomic_add_vec").run(code)
         self.assertEqual(fn(v), actual, atol=1e-4, rtol=1e-4)
 
     def test_conv_max_pool_where_backward_mutation_dep(self):
@@ -2725,7 +2727,9 @@ class CPUReproTests(TestCase):
                 channel_shuffle,
                 (x, 2, output_scale, output_zero_point, quant_min, quant_max, dtype),
             )
-            check_metrics_vec_kernel_count(2)
+            if not config.avoid_modular_indexing:
+                # the realized channel shuffle changes the vectorized kernels
+                check_metrics_vec_kernel_count(2)
 
     @requires_vectorization
     def test_tile2d_store_channel_shuffle_cl_quant_output_uint8(self):
@@ -4805,7 +4809,9 @@ class CPUReproTests(TestCase):
                 metrics.reset()
                 x = torch.randn(64, 58, 28, 28)
                 self.common(channel_shuffle, (x, 2))
-                check_metrics_vec_kernel_count(2)
+                if not config.avoid_modular_indexing:
+                    # the realized channel shuffle changes the vectorized kernels
+                    check_metrics_vec_kernel_count(2)
 
     @slowTest
     @requires_vectorization
@@ -5811,6 +5817,9 @@ class CPUReproTests(TestCase):
                 compiled_m = torch.compile(mod, dynamic=dynamic)
                 actual, code = run_and_get_cpp_code(compiled_m, x)
                 self.assertEqual(expected, actual)
+                if config.avoid_modular_indexing:
+                    # the dim-aligned split of var_mean changes the kernels
+                    continue
                 # 3 generated kernels (first one for var_mean, last two for result)
                 check_metrics_vec_kernel_count(3)
 
@@ -6872,7 +6881,9 @@ class CPUReproTests(TestCase):
 
         metrics.reset()
         self.common(fn, ())
-        check_metrics_vec_kernel_count(1)
+        if not config.avoid_modular_indexing:
+            # the realized window partition changes the vectorized kernels
+            check_metrics_vec_kernel_count(1)
 
     def test_highp_to_lowp_cse_var_cache_with_store(self):
         # Fix issue: https://github.com/pytorch/pytorch/issues/128263
