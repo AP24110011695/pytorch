@@ -668,6 +668,17 @@ def reinplace_inplaceable_ops_core(graph: torch.fx.Graph) -> None:
                 # Therefore the semantics of the program are that it does not mutate
                 # mutated_arg, so we cannot re-inplace it.
                 return False
+            if (
+                isinstance(node.meta.get("val"), torch.Tensor)
+                and get_node_storage(copy_node.args[1]) != get_node_storage(node)
+                and any_use_of_views_after_node(
+                    copy_node,
+                    storage_to_nodes[get_node_storage(node)],
+                    copy_node=None,
+                    mutated_arg=node,
+                )
+            ):
+                return False
             if any_use_of_views_after_node(
                 node, shared_view_nodes, copy_node=copy_node, mutated_arg=mutated_arg
             ):
