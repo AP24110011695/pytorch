@@ -2019,6 +2019,11 @@ class cpp:
     # No size heuristic, so benchmark the model before enabling.
     enable_cpu_flash_attention_decomposition: bool = False
 
+    # On AVX2, reduce float vector lanes with a shuffle tree (simd_vec_reduce_all
+    # in cpp_prefix.h) instead of at::vec::vec_reduce_all, whose tree path is
+    # GCC-only. Changes the rounding of horizontal float sums.
+    simd_horizontal_reduction: bool = False
+
     # Do not generate loops when the condition doesn't hold, like:
     # for(long i0=4096; i0<4096; i0+=1)
     no_redundant_loops = (
